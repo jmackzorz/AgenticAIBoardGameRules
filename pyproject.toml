@@ -1,0 +1,40 @@
+[project]
+name = "bgg-monorepo"
+version = "0.1.0"
+description = "Board game research agent + rulebook indexing pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.50.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0",
+    "pypdf>=6.11.0",
+]
+
+[project.optional-dependencies]
+lambda = ["boto3>=1.35.0"]
+cli = ["rich>=13.7.0"]
+ingestion = [
+    "marker-pdf",
+    "voyageai",
+    "numpy",
+    "tiktoken",
+    "langdetect",
+    "tqdm",
+    "typer",
+    "streamlit",
+    "streamlit-pdf-viewer",
+    "curl-cffi>=0.15.0",
+    "playwright>=1.59.0",
+]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+bgg-agent = "main:run"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["packages/shared", "packages/lambda_handler", "packages/ingestion"]

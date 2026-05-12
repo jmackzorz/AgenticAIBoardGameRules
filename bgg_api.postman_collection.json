@@ -1,0 +1,72 @@
+{
+  "info": {
+    "name": "BGG XML API v2",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "41b9b686-8528-4ab6-ba94-76a58e657b4c",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Search Games",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://boardgamegeek.com/xmlapi2/search?query=catan&type=boardgame",
+          "protocol": "https",
+          "host": ["boardgamegeek", "com"],
+          "path": ["xmlapi2", "search"],
+          "query": [
+            { "key": "query", "value": "catan" },
+            { "key": "type", "value": "boardgame" },
+            { "key": "exact", "value": "1", "disabled": true }
+          ]
+        },
+        "description": "Search for board games by name. Enable 'exact' param for exact name match only."
+      }
+    },
+    {
+      "name": "Get Game Details",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://boardgamegeek.com/xmlapi2/thing?id=13,822&stats=1",
+          "protocol": "https",
+          "host": ["boardgamegeek", "com"],
+          "path": ["xmlapi2", "thing"],
+          "query": [
+            { "key": "id", "value": "13,822", "description": "Comma-separated BGG game IDs. 13=Catan, 822=Carcassonne" },
+            { "key": "stats", "value": "1", "description": "Include ratings and rankings" }
+          ]
+        },
+        "description": "Fetch full details for one or more games by BGG ID. Up to 20 IDs comma-separated."
+      }
+    },
+    {
+      "name": "Hot Games",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "https://boardgamegeek.com/xmlapi2/hot?type=boardgame",
+          "protocol": "https",
+          "host": ["boardgamegeek", "com"],
+          "path": ["xmlapi2", "hot"],
+          "query": [
+            { "key": "type", "value": "boardgame" }
+          ]
+        },
+        "description": "Fetch the current BGG trending/hot games list."
+      }
+    }
+  ]
+}

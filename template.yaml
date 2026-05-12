@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: BGG Research Agent Lambda
+
+Parameters:
+  SessionsTable:
+    Type: String
+    Default: bgg_sessions
+    Description: DynamoDB table name for conversation sessions
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Description: Anthropic API key (passed at deploy time, not stored here)
+  BggApiToken:
+    Type: String
+    NoEcho: true
+    Description: BGG Bearer token from boardgamegeek.com/applications
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 512
+
+Resources:
+  BggAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: package/
+      Handler: lambda_function.handler
+      Environment:
+        Variables:
+          SESSIONS_TABLE: !Ref SessionsTable
+          ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+          BGG_API_TOKEN: !Ref BggApiToken
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+      Events:
+        ChatApi:
+          Type: Api
+          Properties:
+            Path: /chat
+            Method: post
+
+Outputs:
+  BggAgentFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt BggAgentFunction.Arn
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/chat"

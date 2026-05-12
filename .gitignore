@@ -1,0 +1,13 @@
+.env
+local_env.json
+.venv/
+__pycache__/
+*.pyc
+.aws-sam/
+deployment.zip
+package/
+data/
+*.egg-info/
+.pytest_cache/
+response.json
+.claude/

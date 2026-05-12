@@ -1,0 +1,7 @@
+{
+  "body": "{\"session_id\": \"test-session-001\", \"message\": \"What are the top rated board games on BGG right now?\"}",
+  "httpMethod": "POST",
+  "headers": {
+    "Content-Type": "application/json"
+  }
+}
