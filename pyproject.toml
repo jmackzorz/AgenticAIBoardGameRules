@@ -9,6 +9,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0",
     "pypdf>=6.11.0",
+    "duckduckgo-search>=8.1.1",
+    "ddgs>=9.14.2",
 ]
 
 [project.optional-dependencies]

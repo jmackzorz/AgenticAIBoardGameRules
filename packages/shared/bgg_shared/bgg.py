@@ -11,7 +11,7 @@ from .models import BoardGame, SearchResult
 _BASE_URL = "https://boardgamegeek.com/xmlapi2"
 _TIMEOUT = 30.0
 _RETRY_DELAY = 3.0   # base delay; multiplied by attempt number on each retry
-_MAX_RETRIES = 5
+_MAX_RETRIES = 10
 
 
 class BggClient:
@@ -50,7 +50,8 @@ class BggClient:
                 return ET.fromstring(response.text)
             if response.status_code in (202, 401, 429):
                 # 202: BGG queued the request (result not cached yet)
-                # 401/429: BGG rate-limit signal; back off and retry
+                # 401/429: BGG is known to return these transiently even with
+                #          a valid Bearer token — keep retrying with backoff
                 time.sleep(_RETRY_DELAY * (attempt + 1))
                 continue
             response.raise_for_status()

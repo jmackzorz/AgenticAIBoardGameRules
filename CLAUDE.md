@@ -1,5 +1,7 @@
 # CLAUDE.md — BGG Monorepo
 
+“Unless asked, provide implementations without lengthy explanations. Prefer concise responses.”
+
 ## What this repo is
 
 A board game research tool with two main pieces:
