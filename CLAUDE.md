@@ -1,208 +1,112 @@
-# CLAUDE.md — BGG Monorepo
+# Project: BGG Board Game Research Agent
 
-“Unless asked, provide implementations without lengthy explanations. Prefer concise responses.”
+## Overview
+A board game research tool that exposes BGG (BoardGameGeek) data through an agentic Claude AI via AWS Lambda, paired with a local ingestion pipeline that converts rulebook PDFs into searchable, embedded chunks. Built as a Python portfolio project demonstrating agentic AI, cloud deployment, and data pipeline patterns.
 
-## What this repo is
+## Stack
+- **Language:** Python 3.11+
+- **Runtime:** Python 3.11 (Lambda), local venv (ingestion)
+- **Framework:** AWS SAM (Lambda), Typer (CLI), Streamlit (viewer UI)
+- **Database:** DynamoDB (Lambda session storage, 24-hour TTL)
+- **ORM/Query:** boto3 direct (no ORM)
+- **Auth:** `API_SECRET` header on Lambda requests; BGG login via curl_cffi session
+- **Testing:** pytest
+- **Package mgr:** uv (`pyproject.toml` with optional dependency groups)
+- **CI/CD:** None — Lambda deployed manually via `sam deploy`
 
-A board game research tool with two main pieces:
-1. **AWS Lambda** — exposes BGG (BoardGameGeek) API functionality to an agentic Claude AI via HTTP
-2. **Local ingestion pipeline** — converts board game rulebook PDFs into searchable, embedded chunks
-
-## Monorepo layout
-
+## Project Structure
 ```
 packages/
-  shared/bgg_shared/        # Shared library (Lambda + ingestion both depend on this)
-    bgg.py                  # BGG XML API v2 client (BggClient)
-    models.py               # BGG API Pydantic models (BoardGame, SearchResult)
-    schema.py               # Pipeline models (Chunk, GameIndex)
-    embedder.py             # Voyage AI embeddings wrapper
-    retry.py                # Exponential backoff decorator (@with_retry)
-
-  lambda_handler/           # AWS Lambda — do NOT add ingestion deps here
-    lambda_function.py      # SAM entry point (re-exports handler)
+  shared/bgg_shared/        # Shared library — imported by both Lambda and ingestion
+  lambda_handler/           # AWS Lambda artifact — strict import isolation enforced
     bgg_lambda/
-      handler.py            # Lambda handler (boto3 DynamoDB, anthropic SDK)
-      agent.py              # BggAgent — agentic loop using Claude
-      tools/
-        definitions.py      # Tool schemas for Claude
-        handlers.py         # Tool implementations
-
-  ingestion/                # Local-only batch pipeline
+      handler.py            # SAM entry point; has module-level AWS calls (not testable without creds)
+      agent.py              # BggAgent — stateful agentic loop using Claude Sonnet
+      tools/                # Claude tool definitions + dispatch handlers
+  ingestion/                # Local-only batch pipeline — never referenced by Lambda
     bgg_ingestion/
-      downloader.py         # BGG rulebook downloader (see "BGG download architecture" below)
-                            #   also contains get_top_rankings() for scraping BGG ranked list
-      extractor.py          # PDF → markdown via marker-pdf (cached to data/markdown/)
-      chunker.py            # Markdown → Chunk list (heading-based, with fallback windowing)
-      enricher.py           # Claude Haiku topic tagging + Voyage embeddings
+      cli.py                # Typer CLI (download / download-top / index / qa / reembed / inspect / scan / refetch)
+      downloader.py         # BGG rulebook downloader (curl_cffi + Playwright)
+      extractor.py          # PDF → markdown via marker-pdf (cached)
+      chunker.py            # Markdown → Chunk list (heading-based with fallback windowing)
+      enricher.py           # Claude Haiku topic tagging + Voyage AI embeddings
       qa.py                 # QA gates → GameIndex.qa_flags
-      cli.py                # Typer CLI (download / download-top / index / qa / reembed / inspect commands)
-    viewer/
-      app.py                # Streamlit review UI
-
-data/                       # gitignored runtime data
-  pdfs/                     # Input: <bggId>.pdf
-  markdown/                 # Cache: marker output per PDF
-  chunks/                   # Output: <bggId>.json (GameIndex)
-  embeddings/               # Output: <bggId>.npy (float32 vectors)
-  bgg_cache/                # Cache: BGG API responses
-
-tests/
-  test_chunker.py           # 22 tests — chunker internals + public chunk()
-  test_qa.py                # 14 tests — one synthetic trigger per QA gate
-  test_lambda_import_isolation.py  # Ensures bgg_lambda never imports ingestion deps
+    viewer/app.py           # Streamlit review UI
+data/                       # Gitignored runtime data (pdfs/, markdown/, chunks/, embeddings/, bgg_cache/)
+tests/                      # pytest test suite (flat, not mirroring src)
 ```
 
-## Key data models (bgg_shared/schema.py)
+## Architecture Decisions
+- **Strict Lambda/ingestion isolation**: `bgg_lambda` must never import `marker`, `torch`, `streamlit`, `voyageai`, `tiktoken`, or `langdetect`. Enforced by `test_lambda_import_isolation.py` and a separate `build_lambda.ps1` that installs Lambda deps explicitly.
+- **curl_cffi over httpx/requests for BGG downloads**: BGG is behind Cloudflare managed challenge. Standard clients get 403. `curl_cffi` impersonates Chrome TLS fingerprinting and is the only client that works.
+- **Non-headless Playwright for BGG file pages**: The download URL only exists after the React SPA renders. Headless Chromium is blocked by Cloudflare's JS challenge — the browser must be visible.
+- **Voyage AI embeddings stored as `.npy` files**: Flat-file storage (one per `bgg_id`) rather than a vector database. Simple and sufficient for the current dataset size.
+- **Claude Haiku for topic tagging, Sonnet for the agent**: Haiku is ~$0.01/rulebook for tagging 3-5 topics per chunk. Sonnet handles the interactive agentic loop in Lambda.
+- **Prompt caching on the system prompt**: `BggAgent.chat()` sends the system prompt with `"cache_control": {"type": "ephemeral"}` to reduce per-turn cost.
+- **DynamoDB for session persistence**: Lambda is stateless; conversation history is serialized to JSON and stored in DynamoDB with a 24-hour TTL. `handler.py` deserializes on cold start.
+- **BGG XML API v2**: Public API (`boardgamegeek.com/xmlapi2`). No BGG API key required for basic search/detail/hot endpoints. API returns 202 when results aren't cached yet — `BggClient._get_xml()` retries with backoff.
+- **Monorepo with `pyproject.toml` optional groups**: `[ingestion]`, `[lambda]`, `[cli]`, `[dev]` — keeps Lambda artifact small and ingestion deps (marker-pdf, torch, voyageai) out of Lambda.
 
-```python
-class Chunk(BaseModel):
-    chunk_id: str           # "{bgg_id}_{idx:03d}"
-    bgg_id: int
-    game_name: str
-    section_path: list[str] # heading ancestry, e.g. ["Setup", "The Key"]
-    page: int | None
-    topics: list[str]       # 3-5 tags from Haiku
-    summary: str
-    chunk_type: str         # "rules" | "setup" | "variant" | "reference"
-    token_count: int
-    text: str
-    embedding: list[float] | None  # excluded from JSON serialization
+## Coding Conventions
+- **Naming**: `snake_case` for variables/functions/modules, `PascalCase` for classes, `UPPER_SNAKE_CASE` for module-level constants
+- **Private scope**: Module-level private symbols and instance helpers prefixed with `_` (e.g., `_MODEL`, `_get_xml`, `_run_tool_calls`)
+- **Type hints**: Required on all function signatures; use `X | Y` union syntax (Python 3.10+ style), not `Optional[X]`
+- **Context managers**: Stateful clients (`BggClient`, `BggAgent`) implement `__enter__`/`__exit__` and a `close()` method
+- **Docstrings**: Public methods get a one-liner or short Google-style docstring with `Args:` if non-obvious. Private helpers get none.
+- **Comments**: Explain WHY (hidden constraints, non-obvious invariants, known BGG behavior). No inline comments describing what the code does.
+- **Models**: Pydantic v2 for all data models (`bgg_shared/models.py`, `bgg_shared/schema.py`)
+- **Line length**: No enforced limit, but keep lines readable
 
-class GameIndex(BaseModel):
-    bgg_id: int
-    game_name: str
-    source_pdf: str
-    indexed_at: datetime
-    chunks: list[Chunk]
-    qa_flags: list[str]
-```
+## Testing Expectations
+- Run with: `.venv\Scripts\python.exe -m pytest tests/ -v`
+- `test_chunker.py` — 22 tests covering chunker internals and the public `chunk()` function
+- `test_qa.py` — 14 tests, one synthetic trigger per QA gate
+- `test_lambda_import_isolation.py` — imports `bgg_lambda` and asserts none of the banned ingestion packages are transitively loaded
+- `handler.py` **cannot be imported in tests** without live AWS credentials — it has module-level `boto3` and `os.environ["SESSIONS_TABLE"]` calls. Write tests against `agent.py` and `BggClient` directly, injecting mock clients.
+- Chunker test paragraphs must exceed 60 tokens (`_MIN_TOKENS = 60`) to avoid unexpected merges invalidating assertions.
+- No UI component tests; no need to hit the real BGG API in unit tests.
 
-## Environment variables (.env)
+## Dependencies
 
-```
-ANTHROPIC_API_KEY=...       # Used by: Lambda handler + ingestion enricher (Haiku tagging)
-VOYAGE_API_KEY=...          # Used by: ingestion embedder (Voyage AI)
-SESSIONS_TABLE=...          # Used by: Lambda handler (DynamoDB)
-API_SECRET=...              # Used by: Lambda handler (request auth)
-BGG_API_KEY=...             # Optional — BGG client (public API works without it)
-BGG_USERNAME=...            # Used by: ingestion downloader (BGG account login)
-BGG_PASSWORD=...            # Used by: ingestion downloader (BGG account login)
-```
+**Approved (core):**
+- `anthropic>=0.50.0` — Claude API (Haiku tagging + Sonnet agent)
+- `httpx` — BGG XML API HTTP client
+- `pydantic>=2.0` — data models and validation
+- `boto3` — AWS DynamoDB + Lambda (Lambda package only)
+- `python-dotenv` — `.env` loading
+- `rich` — CLI output formatting
 
-## How to run things
+**Approved (ingestion only — never add to Lambda):**
+- `marker-pdf` — PDF → markdown conversion
+- `voyageai` — Voyage AI embeddings
+- `numpy` — embedding storage (`.npy` files)
+- `tiktoken` — token counting for chunking
+- `langdetect` — language filtering
+- `typer` — CLI framework
+- `streamlit`, `streamlit-pdf-viewer` — viewer UI
+- `curl-cffi>=0.15.0` — Cloudflare-bypassing HTTP for BGG downloads
+- `playwright>=1.59.0` — Chromium automation for BGG file page rendering
+- `pypdf>=6.11.0` — PDF auditing in the `scan` command
+- `duckduckgo-search`, `ddgs` — rulebook search in the `refetch` command
 
-### Ingestion pipeline
-```
-# Download English rulebook PDFs from BGG (requires BGG_USERNAME + BGG_PASSWORD in .env)
-# Opens a brief non-headless browser window per game (needed to bypass Cloudflare)
-python -m bgg_ingestion.cli download 178900 266192 --resume
+**Off-limits in Lambda:** `marker`, `torch`, `streamlit`, `voyageai`, `tiktoken`, `langdetect`
 
-# Download rulebooks for the top 500 BGG-ranked games (skips already-downloaded by default)
-# ~3-6 hours for a full run; safe to interrupt and re-run (resume is on by default)
-python -m bgg_ingestion.cli download-top
-python -m bgg_ingestion.cli download-top 100          # top 100 instead
-python -m bgg_ingestion.cli download-top --delay 10.0 # longer delay between games
+**Avoid:** `requests` (use `httpx` or `curl_cffi` depending on context), `moment.js`-style date libs, adding new top-level dependencies without discussion
 
-# Index all PDFs in data/pdfs/, skip already-indexed
-python -m bgg_ingestion.cli index data/pdfs/ --output data/chunks/ --resume
+## Off-Limits Areas
+- Do not add ingestion dependencies to `packages/lambda_handler/` or `build_lambda.ps1`
+- Do not modify `requirements.txt` manually — it is generated by `uv export`
+- Do not import `handler.py` in tests (module-level AWS calls will raise)
+- Do not modify `data/` contents — it is gitignored runtime data
+- Do not change `samconfig.toml` without discussing Lambda deployment parameters first
+- Do not refactor outside the scope of the current task
 
-# Check QA flags across all indexed games
-python -m bgg_ingestion.cli qa data/chunks/
+## Current Focus
+PDF audit pipeline — auditing ~497 downloaded rulebook PDFs. ~223 are flagged as suspicious (wrong file type, e.g. solo rules or quick-reference cards). The `refetch` command (searches `cdn.1j1ju.com`) has a false-positive name-match fix applied as of 2026-05-12. Next steps: run refetch on the suspicious list, manually review games not found on 1j1ju, delete 4 confirmed bad PDFs and re-download via `download-top --resume`, then re-run `scan` to verify.
 
-# Inspect chunks for a specific game
-python -m bgg_ingestion.cli inspect 178900 --limit 5
-
-# Re-run embeddings only (no re-tagging)
-python -m bgg_ingestion.cli reembed 178900
-```
-
-### Streamlit viewer
-```
-streamlit run packages/ingestion/viewer/app.py
-```
-Run from repo root. Loads from data/chunks/ and data/pdfs/.
-
-### Tests
-```
-.venv\Scripts\python.exe -m pytest tests/ -v
-```
-
-### Lambda deployment
-```powershell
-.\build_lambda.ps1          # Rebuilds package/ directory
-sam deploy --parameter-overrides ...
-```
-Lambda dependencies are installed explicitly in `build_lambda.ps1` — never add ingestion deps (marker-pdf, torch, streamlit, voyageai) to the Lambda artifact.
-
-## Important constraints
-
-- **Lambda isolation**: `bgg_lambda` must never import `marker`, `torch`, `streamlit`, `voyageai`, `tiktoken`, or `langdetect`. Enforced by `test_lambda_import_isolation.py`.
-- **handler.py has module-level AWS calls** (`boto3`, `os.environ["SESSIONS_TABLE"]`) — it cannot be imported in tests without AWS credentials.
-- **Ingestion API costs**: `tag_chunks` calls Claude Haiku via API key (not Claude Pro). Haiku is cheap (~$0.01/rulebook) but it's not free.
-- **Chunker merge threshold**: `_MIN_TOKENS = 60`. Sections under 60 tokens get merged with their neighbour. Test paragraphs must exceed 60 tokens to avoid unexpected merges.
-
-## BGG download architecture
-
-BGG rulebook downloads require navigating three layers of protection. This is already solved — do not rearchitect without reading this first.
-
-### Why it's complex
-- `boardgamegeek.com` is behind **Cloudflare managed challenge** — headless browsers get 403
-- The filepage is a **React SPA** — the download URL only exists after JavaScript renders it
-- The `api.geekdo.com/api/file/downloadurls` endpoint requires browser-held session state that cannot be replicated with a plain HTTP client (returns 403)
-
-### What the BGG JSON API provides (no auth needed)
-- `GET api.geekdo.com/api/files?objecttype=thing&objectid={bggId}&languageid=2184&sort=hot&pageid=1`
-  Returns paginated file listings. `config.endpage` tells you total page count.
-- Each file entry has: `fileid`, `filepageid`, `filename`, `title`, `numpositive`, `href` (`/filepage/{id}/slug`)
-- **Does NOT include a download URL** — that requires authentication + the browser session
-
-### The actual download flow
-1. **`curl_cffi` session** (Chrome TLS impersonation) logs in via `POST boardgamegeek.com/login/api/v1` → gets `SessionID` cookie
-2. **Non-headless Playwright** (Chromium) navigates to `boardgamegeek.com`, logs in via `fetch()`, navigates to the filepage, waits 8s for React to render
-3. Extracts `/file/download_redirect/{signed-token}/{filename}` from the rendered DOM — this is a time-limited AWS presigned redirect
-4. **`curl_cffi`** follows the redirect chain: `boardgamegeek.com/file/download_redirect/...` → `s3.amazonaws.com/geekdo-files.com/bgg{fileid}?X-Amz-...` → PDF bytes
-
-### Key implementation notes
-- `downloader.py` uses `curl_cffi` (not `requests`) throughout — it's the only client that passes Cloudflare's TLS fingerprinting for `boardgamegeek.com` downloads
-- The browser must be **non-headless** — Cloudflare's JS challenge detects and blocks headless Chromium
-- The signed S3 URL expires in ~120 seconds, so extract-then-download must happen in one flow
-- `playwright install chromium` must be run once after installing deps
-- Files are stored at `s3.amazonaws.com/geekdo-files.com/bgg{fileid}` (discovered via network interception)
-
-### Picking the best rulebook
-`pick_rulebook(files)` in `downloader.py` filters to `.pdf` files, prefers those with "rule" in title/filename, then sorts by `numpositive` (community votes).
-
-**Known issue**: the current selector is too naive. In practice it sometimes picks:
-- Solo mode rulebooks (e.g. "Solo Rules for Concordia") over the full game rulebook
-- Variant rule documents
-- Reference cards / player aids
-
-**Planned fix** (not yet implemented): replace with tier-based scoring:
-- Tier -1 (last resort): title/filename contains "solo", "variant", "player aid", "reference card", "quick reference", "faq", "errata"
-- Tier 0 (fallback PDF): no rule-related keywords
-- Tier 1: contains "rule" but no avoid terms
-- Tier 2: contains "rules" but no avoid terms
-- Tier 3: contains "rulebook", "complete rules", "core rules"
-- Within each tier, sort by `numpositive` (community votes) descending
-
-Also planned: a `scan` CLI command (requires `pip install pypdf`) that audits already-downloaded PDFs by page count, file size, and first-page keyword analysis to flag ones that are probably not full rulebooks.
-
-### Fetching the BGG ranked list
-`get_top_rankings(session, limit)` in `downloader.py` scrapes `boardgamegeek.com/browse/boardgame`.
-
-Key implementation notes:
-- **Must use the `curl_cffi` session** (Chrome TLS fingerprint) — plain `httpx` gets a 403 from Cloudflare
-- **Pagination is path-based**: `/browse/boardgame/page/2`, NOT `?page=2` (query param is ignored)
-- **Game name links have `class='primary'`** — use this to avoid matching thumbnail/sidebar/footer links that would pollute results with non-ranked game IDs
-- 100 games per page; for 500 games, fetches 5 pages with a 2-second delay between pages
-- No login required — the rankings page is public
-
-## Chunking rules summary
-
-- Markdown headings (`#`, `##`, `###`) are cut points; section_path tracks ancestry
-- Target: 100–500 tokens per chunk
-- Merge siblings if either is under 60 tokens
-- Never split lists or tables (protected blocks)
-- Skip sections matching: "illustration:", "graphic design:", "© ", "translation:"
-- Fallback: 400-token windows with 50-token overlap when no headings detected
+## Known Issues / Tech Debt
+- **`pick_rulebook()` is too naive** — sometimes picks solo-mode or variant rulebooks over the full game rulebook. A tier-based scoring fix is designed (see CLAUDE.md "Planned fix") but not yet implemented.
+- **`handler.py` untestable without AWS** — module-level DynamoDB and `os.environ` calls make unit testing the Lambda entry point impossible without live credentials or significant mocking.
+- **No CI/CD** — all deployments are manual via `sam deploy`. No automated test runner on push.
+- **BGG download is slow** — the Playwright + curl_cffi flow takes ~15-30 seconds per game due to the 8-second React render wait and Cloudflare delays. `download-top` for 500 games takes 3-6 hours.
+- **Scan command `--fetch-bgg` populates a 37-field BGG metadata cache** (`data/bgg_cache/<bggId>.json`). Old partial cache entries lack the `"artists"` key — used as a sentinel to detect stale entries.
