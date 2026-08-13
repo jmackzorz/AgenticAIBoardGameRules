@@ -1,11 +1,15 @@
 """Core agent: drives the Claude tool-use loop backed by BGG data."""
 
-import anthropic
+import os
+
+from anthropic import AnthropicBedrockMantle
 
 from bgg_shared.bgg import BggClient
 from .tools import TOOL_DEFINITIONS, dispatch
 
-_MODEL = "claude-sonnet-4-6"
+# Bedrock serves the same Messages API but namespaces model IDs under `anthropic.`.
+_MODEL = "anthropic.claude-sonnet-4-6"
+_DEFAULT_REGION = "us-west-2"
 
 _SYSTEM_PROMPT = """You are a knowledgeable board game research assistant powered by
 live data from BoardGameGeek (BGG), the world's largest board game database.
@@ -30,13 +34,17 @@ class BggAgent:
 
     def __init__(
         self,
-        api_key: str | None = None,
         *,
-        anthropic_client: anthropic.Anthropic | None = None,
+        region: str | None = None,
+        anthropic_client: AnthropicBedrockMantle | None = None,
         bgg_client: BggClient | None = None,
         initial_history: list[dict] | None = None,
     ) -> None:
-        self._client = anthropic_client or anthropic.Anthropic(api_key=api_key)
+        # Credentials come from the ambient AWS chain (task role locally, execution
+        # role in AgentCore) — there is no API key to pass or store.
+        self._client = anthropic_client or AnthropicBedrockMantle(
+            aws_region=region or os.environ.get("AWS_REGION") or _DEFAULT_REGION
+        )
         self._bgg = bgg_client or BggClient()
         self._owns_bgg = bgg_client is None
         self._history: list[dict] = list(initial_history) if initial_history else []

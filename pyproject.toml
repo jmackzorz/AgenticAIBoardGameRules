@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-lambda = ["boto3>=1.35.0"]
+agentcore = ["boto3>=1.35.0", "bedrock-agentcore>=0.1.0"]
 cli = ["rich>=13.7.0"]
 ingestion = [
     "marker-pdf",
@@ -39,4 +39,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["packages/shared", "packages/lambda_handler", "packages/ingestion"]
+where = ["packages/shared", "packages/agentcore", "packages/ingestion"]

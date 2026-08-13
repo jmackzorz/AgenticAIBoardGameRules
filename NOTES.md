@@ -3,25 +3,25 @@
 ## What this repo is
 
 A board game research tool with two main pieces:
-1. **AWS Lambda** — exposes BGG (BoardGameGeek) API functionality to an agentic Claude AI via HTTP
+1. **Bedrock AgentCore Runtime** — exposes BGG (BoardGameGeek) API functionality to an agentic Claude AI over HTTP
 2. **Local ingestion pipeline** — converts board game rulebook PDFs into searchable, embedded chunks
 
 ## Monorepo layout
 
 ```
 packages/
-  shared/bgg_shared/        # Shared library (Lambda + ingestion both depend on this)
+  shared/bgg_shared/        # Shared library (agent + ingestion both depend on this)
     bgg.py                  # BGG XML API v2 client (BggClient)
     models.py               # BGG API Pydantic models (BoardGame, SearchResult)
     schema.py               # Pipeline models (Chunk, GameIndex)
     embedder.py             # Voyage AI embeddings wrapper
     retry.py                # Exponential backoff decorator (@with_retry)
 
-  lambda_handler/           # AWS Lambda — do NOT add ingestion deps here
-    lambda_function.py      # SAM entry point (re-exports handler)
-    bgg_lambda/
-      handler.py            # Lambda handler (boto3 DynamoDB, anthropic SDK)
-      agent.py              # BggAgent — agentic loop using Claude
+  agentcore/                # Bedrock AgentCore Runtime — do NOT add ingestion deps here
+    bgg_agentcore/
+      app.py                # Runtime entry point (@app.entrypoint → POST /invocations)
+      agent.py              # BggAgent — agentic loop using Claude via Bedrock
+      sessions.py           # MemorySessionStore — AgentCore Memory short-term events
       tools/
         definitions.py      # Tool schemas for Claude
         handlers.py         # Tool implementations
@@ -48,7 +48,8 @@ data/                       # gitignored runtime data
 tests/
   test_chunker.py           # 22 tests — chunker internals + public chunk()
   test_qa.py                # 14 tests — one synthetic trigger per QA gate
-  test_lambda_import_isolation.py  # Ensures bgg_lambda never imports ingestion deps
+  test_agentcore_import_isolation.py  # Ensures bgg_agentcore never imports ingestion deps
+  test_sessions.py          # 11 tests — MemorySessionStore against a fake boto3 client
 ```
 
 ## Key data models (bgg_shared/schema.py)
@@ -79,10 +80,11 @@ class GameIndex(BaseModel):
 ## Environment variables (.env)
 
 ```
-ANTHROPIC_API_KEY=...       # Used by: Lambda handler + ingestion enricher (Haiku tagging)
+ANTHROPIC_API_KEY=...       # Used by: ingestion enricher only (Haiku tagging). The agent
+                            #   goes through Bedrock and needs no Anthropic key.
 VOYAGE_API_KEY=...          # Used by: ingestion embedder (Voyage AI)
-SESSIONS_TABLE=...          # Used by: Lambda handler (DynamoDB)
-API_SECRET=...              # Used by: Lambda handler (request auth)
+MEMORY_ID=...               # Used by: agent (AgentCore Memory resource id)
+AWS_REGION=...              # Used by: agent (Bedrock endpoint region)
 BGG_API_KEY=...             # Optional — BGG client (public API works without it)
 BGG_USERNAME=...            # Used by: ingestion downloader (BGG account login)
 BGG_PASSWORD=...            # Used by: ingestion downloader (BGG account login)
@@ -126,17 +128,24 @@ Run from repo root. Loads from data/chunks/ and data/pdfs/.
 .venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
-### Lambda deployment
+### AgentCore deployment
 ```powershell
-.\build_lambda.ps1          # Rebuilds package/ directory
-sam deploy --parameter-overrides ...
+npm install -g @aws/agentcore    # one-time; the CLI is an npm package
+agentcore add memory --name bgg_agent_memory   # short-term only, no strategies
+agentcore deploy
+agentcore invoke --session-id my-session "What is Brass: Birmingham?"
 ```
-Lambda dependencies are installed explicitly in `build_lambda.ps1` — never add ingestion deps (marker-pdf, torch, streamlit, voyageai) to the Lambda artifact.
+Runtime requires an **ARM64** container serving `POST /invocations` and `GET /ping` on port
+8080 — the `bedrock-agentcore` SDK's `BedrockAgentCoreApp` implements both. `agentcore deploy`
+handles the architecture for you with either the CodeZip or Container build type.
+
+Never add ingestion deps (marker-pdf, torch, streamlit, voyageai) to the deployed artifact.
 
 ## Important constraints
 
-- **Lambda isolation**: `bgg_lambda` must never import `marker`, `torch`, `streamlit`, `voyageai`, `tiktoken`, or `langdetect`. Enforced by `test_lambda_import_isolation.py`.
-- **handler.py has module-level AWS calls** (`boto3`, `os.environ["SESSIONS_TABLE"]`) — it cannot be imported in tests without AWS credentials.
+- **Agent isolation**: `bgg_agentcore` must never import `marker`, `torch`, `streamlit`, `voyageai`, `tiktoken`, or `langdetect`. Enforced by `test_agentcore_import_isolation.py`.
+- **`app.py` must stay importable without AWS config** — the memory store is built lazily behind `_get_store()`. Module-level `os.environ[...]` is what made the old Lambda handler untestable.
+- **Bedrock model IDs carry an `anthropic.` prefix** (`anthropic.claude-sonnet-4-6`). A bare first-party ID returns a 400.
 - **Ingestion API costs**: `tag_chunks` calls Claude Haiku via API key (not Claude Pro). Haiku is cheap (~$0.01/rulebook) but it's not free.
 - **Chunker merge threshold**: `_MIN_TOKENS = 60`. Sections under 60 tokens get merged with their neighbour. Test paragraphs must exceed 60 tokens to avoid unexpected merges.
 

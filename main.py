@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.text import Text
 
-from bgg_lambda import BggAgent
+from bgg_agentcore import BggAgent
 
 load_dotenv()
 
@@ -44,17 +44,17 @@ def _print_error(msg: str) -> None:
 
 
 def run() -> None:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    if not region:
         _print_error(
-            "ANTHROPIC_API_KEY is not set. "
-            "Create a .env file with your key or export it in your shell."
+            "No AWS region configured. The agent now calls Claude through Amazon "
+            "Bedrock — run `aws configure` or set AWS_REGION in your .env."
         )
         sys.exit(1)
 
     _print_welcome()
 
-    with BggAgent(api_key=api_key) as agent:
+    with BggAgent(region=region) as agent:
         while True:
             try:
                 user_input = Prompt.ask(

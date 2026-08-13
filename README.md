@@ -2,26 +2,28 @@
 
 An AI-powered board game research tool built on [BoardGameGeek](https://boardgamegeek.com) data. Two independently deployable pieces: a serverless chat API backed by Claude, and a local pipeline that converts board game rulebook PDFs into a searchable, embedded knowledge base.
 
-**Lambda API:** HTTP POST /chat → DynamoDB (session history) → BggAgent → Claude Sonnet → BGG XML API v2
+**Agent API:** POST /invocations → AgentCore Memory (session history) → BggAgent → Claude Sonnet on Bedrock → BGG XML API v2
 
 **Ingestion pipeline:** BGG file listings → Playwright download → marker-pdf → chunker → Claude Haiku (tagging) + Voyage AI (embeddings) → GameIndex JSON → Streamlit viewer
 
-## Lambda API
+## Agent API
 
-Stateful multi-turn chat endpoint. Each request carries a `session_id`; conversation history is persisted in DynamoDB and replayed into Claude on every turn.
+Stateful multi-turn chat hosted on Amazon Bedrock AgentCore Runtime. Each request carries a Runtime session ID; conversation history is persisted as AgentCore Memory short-term events and replayed into Claude on every turn. Each session runs in its own microVM, and turns may run up to 8 hours.
 
-The agent runs a tool-use loop — Claude decides which BGG tools to call, the handler executes them, results feed back in, and Claude iterates until it has an answer. The system prompt is cached (`cache_control: ephemeral`) to cut token costs on repeated turns. The Anthropic client and BGG HTTP session are initialized once at module load so warm Lambda invocations reuse connections.
+The agent runs a tool-use loop — Claude decides which BGG tools to call, the entrypoint executes them, results feed back in, and Claude iterates until it has an answer. The system prompt is marked `cache_control: ephemeral` to cut token costs on repeated turns.
 
-The agent has three tools: `search_games` (full-text BGG catalog search), `get_game_details` (ratings, player count, complexity, mechanics, designers — up to 20 games per call), and `get_hot_games` (BGG's live top-50 trending list). Requests require an `x-api-secret` header; missing or wrong value returns 403 before any BGG or Claude calls are made.
+The agent has three tools: `search_games` (full-text BGG catalog search), `get_game_details` (ratings, player count, complexity, mechanics, designers — up to 20 games per call), and `get_hot_games` (BGG's live top-50 trending list). Callers authenticate with SigV4; there is no shared secret and no Anthropic API key anywhere in the deployment.
 
 ### Deployment
 
 ```powershell
-.\build_lambda.ps1          # Builds package/ directory with only Lambda deps
-sam deploy --parameter-overrides ...
+npm install -g @aws/agentcore
+agentcore add memory --name bgg_agent_memory
+agentcore deploy
+agentcore invoke --session-id my-session "What is Brass: Birmingham?"
 ```
 
-The build script explicitly excludes ingestion dependencies (`marker-pdf`, `torch`, `voyageai`, `streamlit`) — enforced at test time by `test_lambda_import_isolation.py`.
+Runtime requires an ARM64 container serving `POST /invocations` and `GET /ping` on port 8080; `BedrockAgentCoreApp` implements both. The deployed artifact excludes ingestion dependencies (`marker-pdf`, `torch`, `voyageai`, `streamlit`) — enforced at test time by `test_agentcore_import_isolation.py`.
 
 ## Ingestion Pipeline
 
@@ -68,15 +70,15 @@ Both packages depend on this — `bgg.py` (BGG XML API client), `models.py` (BGG
 
 ## Stack
 
-Claude Sonnet 4.6 (agent loop), Claude Haiku 4.5 (batch tagging), Voyage AI `voyage-3` (embeddings), AWS Lambda + SAM + DynamoDB, `marker-pdf`, Pydantic v2, Typer, Streamlit, pytest.
+Claude Sonnet 4.6 via Amazon Bedrock (agent loop), Claude Haiku 4.5 (batch tagging), Voyage AI `voyage-3` (embeddings), Bedrock AgentCore Runtime + Memory, `marker-pdf`, Pydantic v2, Typer, Streamlit, pytest.
 
 ## Setup
 
-Python 3.11+, AWS credentials for Lambda deployment, `playwright install chromium` for ingestion.
+Python 3.11+, AWS credentials with Bedrock model access, `playwright install chromium` for ingestion.
 
 ```bash
 pip install -e packages/shared
-pip install -e packages/lambda_handler
+pip install -e packages/agentcore
 pip install -e packages/ingestion
 
 cp .env.example .env
@@ -84,4 +86,4 @@ cp .env.example .env
 python -m pytest tests/ -v
 ```
 
-Required env vars: `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `SESSIONS_TABLE`, `API_SECRET`, `BGG_USERNAME`, `BGG_PASSWORD`.
+Required env vars: `AWS_REGION` and `MEMORY_ID` (agent); `ANTHROPIC_API_KEY` and `VOYAGE_API_KEY` (ingestion); `BGG_USERNAME` and `BGG_PASSWORD` (rulebook downloads).
